@@ -83,10 +83,48 @@
 - 热点 key（`Tom`）：`QPS 54352.04`，`avg 3.49ms / p95 9.75ms`
 - 混合 key（`Tom/Jack/Sam`）：`QPS 44419.84`，`avg 4.26ms / p95 11.92ms`
 
+## 第六轮（net/http → fasthttp 迁移）
+
+### 优化点
+
+- 服务端 handler 从 `ServeHTTP(w, r)` 替换为 `HandleRequest(ctx *fasthttp.RequestCtx)`（`geecache/http.go`）
+- 客户端 getter 从 `http.Client` 替换为 `fasthttp.Client`，使用 `AcquireRequest/Response` 对象池（`geecache/http.go`）
+- 每个 peer 独立 `fasthttp.Client{MaxConnsPerHost: 64}`（`geecache/http.go`）
+- `main.go` 两个启动函数适配 fasthttp API（`main.go`）
+
+### 结果（`20000` 请求，并发 `200`）
+
+- 热点 key（`Tom`）
+  - 第 1 次：`QPS 63150.55`，`avg 2.80ms / p95 5.00ms`
+  - 第 2 次：`QPS 67199.11`，`avg 2.60ms / p95 6.50ms`
+- 混合 key（`Tom/Jack/Sam`，`60000` 请求）：`QPS 65280.71`，`avg 2.70ms / p95 5.13ms`
+
+> 对比第五轮：热点 key QPS 从 `~55k` → `~67k`（`+22%`），avg 延迟从 `3.49ms` → `2.60ms`（`-25%`）。
+
+## 第七轮（HTTP → 自定义二进制 TCP 协议）
+
+### 优化点
+
+- Peer 间通信从 HTTP（fasthttp）替换为自定义二进制 TCP 协议（`geecache/tcp.go`）
+- 请求帧头从 ~200-500 字节 HTTP 头降至 4 字节：`[uint16 groupLen][uint16 keyLen][group][key]`
+- 响应帧头从 ~200 字节 HTTP 头降至 5 字节：`[uint8 status][uint32 bodyLen][body]`
+- 栈式连接池（上限 64），keep-alive 复用连接，溢出不阻塞
+- 删除 `geecache/http.go`，`main.go` 适配 `TCPPool`
+
+### 结果（`20000` 请求，并发 `200`）
+
+- 热点 key（`Tom`）
+  - 第 1 次：`QPS 70543.15`，`avg 2.50ms / p95 4.70ms`
+  - 第 2 次：`QPS 66049.94`，`avg 2.70ms / p95 5.50ms`
+- 混合 key（`Tom/Jack/Sam`，`60000` 请求）：`QPS 88666.93`，`avg 2.13ms / p95 4.87ms`
+
+> 对比第六轮：热点 key QPS 从 `~67k` → `~70k`（`+5%`），混合 key QPS 从 `~65k` → `~89k`（`+36%`），avg 延迟从 `2.70ms` → `2.13ms`（`-21%`）。
+
 ## 阶段结论
 
-- 当前最好成绩（热点 key）约 `55k QPS`，较第一轮（`27.6k`）提升约 `2x`。
-- 距离 `100k+ QPS` 目标仍有差距，下一步建议：
+- 当前最好成绩：热点 key 约 `70k QPS`，混合 key 约 `89k QPS`，较第一轮（`27.6k`）提升约 `2.5x ~ 3.2x`。
+- 二进制 TCP 协议对混合 key 场景提升显著（`+36%`），热点 key 小幅提升（`+5%`，因本地缓存命中率高，peer 通信占比小）。
+- 距离 `100k+ QPS` 目标已非常接近，下一步建议：
   - 扩大 key 基数（如 `1k+`）做更真实分片收益评估
   - 增加批量请求（batch get）减少 syscall 次数
   - 引入更贴近生产的压测工具与 CPU/GC 指标采集

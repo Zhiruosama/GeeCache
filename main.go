@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"geecache/geecache"
 	"log"
-	"net/http"
+
+	"github.com/valyala/fasthttp"
 )
 
 var db = map[string]string{
@@ -26,27 +27,26 @@ func createGroup() *geecache.Group {
 }
 
 func startCacheServer(addr string, addrs []string, gee *geecache.Group) {
-	peers := geecache.NewHTTPPool(addr)
+	peers := geecache.NewTCPPool(addr)
 	peers.Set(addrs...)
 	gee.RegisterPeers(peers)
 	log.Println("geecache is running at", addr)
-	log.Fatal(http.ListenAndServe(addr[7:], peers))
+	log.Fatal(peers.ListenAndServe())
 }
 
 func startAPIServer(apiAddr string, gee *geecache.Group) {
-	http.Handle("/api", http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			key := r.URL.Query().Get("key")
-			view, err := gee.Get(key)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application.octet-stream")
-			_, _ = w.Write(view.Bytes())
-		}))
+	handler := func(ctx *fasthttp.RequestCtx) {
+		key := string(ctx.QueryArgs().Peek("key"))
+		view, err := gee.Get(key)
+		if err != nil {
+			ctx.Error(err.Error(), fasthttp.StatusInternalServerError)
+			return
+		}
+		ctx.SetContentType("application/octet-stream")
+		ctx.SetBody(view.Bytes())
+	}
 	log.Println("fontend server is running at", apiAddr)
-	log.Fatal(http.ListenAndServe(apiAddr[7:], nil))
+	log.Fatal(fasthttp.ListenAndServe(apiAddr[7:], handler))
 }
 
 func main() {
@@ -58,9 +58,9 @@ func main() {
 
 	apiAddr := "http://localhost:9999"
 	addrMap := map[int]string{
-		8001: "http://localhost:8001",
-		8002: "http://localhost:8002",
-		8003: "http://localhost:8003",
+		8001: "localhost:8001",
+		8002: "localhost:8002",
+		8003: "localhost:8003",
 	}
 
 	var addrs []string
