@@ -22,6 +22,7 @@ const (
 type HTTPPool struct {
 	self        string
 	basePath    string
+	logEnabled  bool
 	mu          sync.RWMutex
 	peers       *consistenthash.Map
 	httpGetters map[string]*httpGetter
@@ -39,7 +40,14 @@ func NewHTTPPool(self string) *HTTPPool {
 	}
 }
 
+func (p *HTTPPool) SetLog(enabled bool) {
+	p.logEnabled = enabled
+}
+
 func (p *HTTPPool) Log(format string, v ...interface{}) {
+	if !p.logEnabled {
+		return
+	}
 	log.Printf("[Server %s] %s", p.self, fmt.Sprintf(format, v...))
 }
 
@@ -69,7 +77,7 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := proto.Marshal(&pb.Response{Value: view.ByteSlice()})
+	body, err := proto.Marshal(&pb.Response{Value: view.Bytes()})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

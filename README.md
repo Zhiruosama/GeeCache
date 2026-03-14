@@ -2,12 +2,18 @@
 
 分布式缓存 GeeCache 学习项目。
 
-## 压测环境与口径
+## 性能目标
+
+- 目标区间：`100k ~ 200k QPS`（对齐 Redis 常见读场景量级）
+- 当前策略：小步快跑，逐轮优化并固定口径压测
+
+## 压测口径
 
 - 接口：`http://localhost:9999/api?key=<key>`
 - 节点：`8001/8002/8003`（`8003` 同时开启 API）
-- 压测参数：并发 `200`，总请求 `10000` 或 `20000`
-- 机器：本机 Windows（AMD Ryzen 7 7735H）
+- 并发：`200`
+- 请求数：`10000` 或 `20000`
+- 机器：Windows / AMD Ryzen 7 7735H
 
 ## 第一轮（原始版本）
 
@@ -16,49 +22,59 @@
 - QPS：`27636.38`
 - 延迟：`avg 7.16ms / p50 5.56ms / p95 11.16ms / p99 63.32ms / max 82.64ms`
 
-## 第二轮（首批优化后）
+## 第二轮（基础性能优化）
 
 ### 优化点
 
 - 去掉缓存命中高频日志（`geecache/geecache.go`）
-- `PickPeer` 改读锁，减少锁竞争（`geecache/http.go`）
+- `PickPeer` 改读锁（`geecache/http.go`）
 - 复用 `http.Client` + KeepAlive（`geecache/http.go`）
 - 修复远程 URL 拼接与错误返回（`geecache/http.go`）
-- 新增并行基准测试（`geecache/benchmark_test.go`）
+- 增加并发基准测试（`geecache/benchmark_test.go`）
 
-### 结果（同口径）
+### 结果
 
 - 总请求：`10000`
 - 总耗时：`0.300s`
 - QPS：`33283.64`
 - 延迟：`avg 5.61ms / p50 3.78ms / p95 8.72ms / p99 60.39ms / max 101.42ms`
 
-> 对比第一轮：QPS 约 `+20.4%`，avg/p95 延迟约 `-21%`。
+> 对比第一轮：QPS 约 `+20.4%`，avg/p95 约 `-21%`。
 
-## 第三轮（LRU 分片后）
+## 第三轮（LRU 分片）
 
 ### 优化点
 
-- 本地缓存从单实例改为 `16` 分片（每片独立 `LRU + Mutex`）：`geecache/cache.go`
-- 总容量按分片均分，保持总容量上限语义：`geecache/cache.go`
+- 本地缓存改为 `16` 分片（每片独立 `LRU + Mutex`）：`geecache/cache.go`
+- 总容量按分片均分：`geecache/cache.go`
 - `key -> shard` 使用无分配 FNV 哈希：`geecache/cache.go`
 
-### 结果 A（热点 key：`Tom`）
+### 结果
 
-- 总请求：`20000`
-- 总耗时：`0.417s`
-- QPS：`47946.61`
-- 延迟：`avg 4.04ms / p50 3.02ms / p95 6.49ms / p99 50.56ms / max 91.43ms`
+- 热点 key（`Tom`，`20000` 请求）：`QPS 47946.61`，`avg 4.04ms`
+- 混合 key（`Tom/Jack/Sam`，`20000` 请求）：`QPS 48889.58`，`avg 3.89ms`
 
-### 结果 B（混合 key：`Tom/Jack/Sam`）
+## 第四轮（并发与分配优化）
 
-- 总请求：`20000`
-- 总耗时：`0.409s`
-- QPS：`48889.58`
-- 延迟：`avg 3.89ms / p50 2.62ms / p95 7.55ms / p99 49.93ms / max 119.05ms`
+### 优化点
 
-## 结论
+- `sync.Pool` 复用 `pb.Request/pb.Response`，减少临时对象分配（`geecache/geecache.go`）
+- `HTTPPool` 日志默认关闭，避免热路径日志 I/O（`geecache/http.go`）
+- 新增 `ByteView.Bytes()`，响应写回路径减少一次拷贝（`geecache/byteview.go`, `geecache/http.go`, `main.go`）
 
-- 分片的核心收益来自“多 key 并发分流”，不是单 key 魔法加速。
-- 在本次口径下，混合 key 的 QPS 高于热点 key，符合分片预期。
-- 若要进一步拉开优势，下一步应增加 key 基数（如 `1k+`）做更真实的分片对比。
+### 两次复测结果（`20000` 请求，并发 `200`）
+
+- 热点 key（`Tom`）
+  - 第 1 次：`QPS 54871.10`，`avg 3.48ms / p95 5.73ms`
+  - 第 2 次：`QPS 52241.27`，`avg 3.68ms / p95 6.09ms`
+- 混合 key（`Tom/Jack/Sam`）
+  - 第 1 次：`QPS 37936.34`，`avg 5.10ms / p95 10.39ms`
+  - 第 2 次：`QPS 42594.41`，`avg 4.52ms / p95 9.02ms`
+
+## 阶段结论
+
+- 当前最好成绩（热点 key）已达约 `55k QPS`，较第一轮（`27.6k`）提升约 `2x`。
+- 距离 `100k+ QPS` 目标仍有差距，下一步建议：
+  - 扩大 key 基数（如 `1k+`）做更真实分片收益评估
+  - 优化远程路径序列化与批量请求
+  - 引入更贴近生产的压测工具与 CPU/GC 指标采集

@@ -12,6 +12,10 @@ func (v ByteView) ByteSlice() []byte {
 	return cloneBytes(v.b)
 }
 
+func (v ByteView) Bytes() []byte {
+	return v.b
+}
+
 func (v ByteView) String() string {
 	return string(v.b)
 }
