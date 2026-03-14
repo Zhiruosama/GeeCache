@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"geecache/geecache/consistenthash"
 	pb "geecache/geecache/geecachepb"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -22,13 +22,14 @@ const (
 type HTTPPool struct {
 	self        string
 	basePath    string
-	mu          sync.Mutex
-	peers       *consistenthash.Map    // 用来根据具体的 key 选择节点
-	httpGetters map[string]*httpGetter // 映射远程节点与对应的 httpGetter
+	mu          sync.RWMutex
+	peers       *consistenthash.Map
+	httpGetters map[string]*httpGetter
 }
 
 type httpGetter struct {
 	baseURL string
+	client  *http.Client
 }
 
 func NewHTTPPool(self string) *HTTPPool {
@@ -43,8 +44,6 @@ func (p *HTTPPool) Log(format string, v ...interface{}) {
 }
 
 func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// 约定访问路径格式为 /<basepath>/<groupname>/<key>
-	// 通过 groupname 得到 group 实例，再使用 group.Get(key) 获取缓存数据。
 	if !strings.HasPrefix(r.URL.Path, p.basePath) {
 		panic("HTTPPool serving unexpected path: " + r.URL.Path)
 	}
@@ -76,29 +75,29 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Write(body)
+	_, _ = w.Write(body)
 }
 
 func (h *httpGetter) Get(in *pb.Request, out *pb.Response) error {
 	u := fmt.Sprintf(
-		"%v%v%v",
+		"%v%v/%v",
 		h.baseURL,
 		url.QueryEscape(in.GetGroup()),
 		url.QueryEscape(in.GetKey()),
 	)
-	res, err := http.Get(u)
+	res, err := h.client.Get(u)
 	if err != nil {
-		return nil
+		return err
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return nil
+		return fmt.Errorf("server returned: %v", res.Status)
 	}
 
-	bytes, err := ioutil.ReadAll(res.Body)
+	bytes, err := io.ReadAll(res.Body)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	if err = proto.Unmarshal(bytes, out); err != nil {
@@ -114,14 +113,23 @@ func (p *HTTPPool) Set(peers ...string) {
 	p.peers = consistenthash.New(defaultReplicas, nil)
 	p.peers.Add(peers...)
 	p.httpGetters = make(map[string]*httpGetter, len(peers))
+	client := &http.Client{
+		Transport: &http.Transport{
+			MaxIdleConns:        len(peers) * 20,
+			MaxIdleConnsPerHost: 20,
+		},
+	}
 	for _, peer := range peers {
-		p.httpGetters[peer] = &httpGetter{baseURL: peer + p.basePath}
+		p.httpGetters[peer] = &httpGetter{
+			baseURL: peer + p.basePath,
+			client:  client,
+		}
 	}
 }
 
 func (p *HTTPPool) PickPeer(key string) (PeerGetter, bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	if peer := p.peers.Get(key); peer != "" && peer != p.self {
 		p.Log("Pick peer %s", peer)
 		return p.httpGetters[peer], true
