@@ -3,7 +3,6 @@ package geecache
 
 import (
 	"fmt"
-	pb "geecache/geecache/geecachepb"
 	"geecache/geecache/singleflight"
 	"log"
 	"sync"
@@ -28,10 +27,8 @@ type Group struct {
 }
 
 var (
-	mu           sync.RWMutex
-	groups       = make(map[string]*Group)
-	requestPool  = sync.Pool{New: func() interface{} { return &pb.Request{} }}
-	responsePool = sync.Pool{New: func() interface{} { return &pb.Response{} }}
+	mu     sync.RWMutex
+	groups = make(map[string]*Group)
 )
 
 func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
@@ -81,6 +78,7 @@ func (g *Group) load(key string) (value ByteView, err error) {
 		if g.peers != nil {
 			if peer, ok := g.peers.PickPeer(key); ok {
 				if value, err = g.getFromPeer(peer, key); err == nil {
+					g.populateCache(key, value)
 					return value, nil
 				}
 				log.Println("[GeeCache] Failed to get from peer", err)
@@ -95,26 +93,11 @@ func (g *Group) load(key string) (value ByteView, err error) {
 }
 
 func (g *Group) getFromPeer(peer PeerGetter, key string) (ByteView, error) {
-	req := requestPool.Get().(*pb.Request)
-	req.Group = g.name
-	req.Key = key
-	defer func() {
-		req.Group = ""
-		req.Key = ""
-		requestPool.Put(req)
-	}()
-
-	res := responsePool.Get().(*pb.Response)
-	defer func() {
-		res.Value = nil
-		responsePool.Put(res)
-	}()
-
-	err := peer.Get(req, res)
+	bytes, err := peer.Get(g.name, key)
 	if err != nil {
 		return ByteView{}, err
 	}
-	return ByteView{b: cloneBytes(res.Value)}, nil
+	return ByteView{b: bytes}, nil
 }
 
 func (g *Group) getLocally(key string) (ByteView, error) {

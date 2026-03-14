@@ -71,10 +71,22 @@
   - 第 1 次：`QPS 37936.34`，`avg 5.10ms / p95 10.39ms`
   - 第 2 次：`QPS 42594.41`，`avg 4.52ms / p95 9.02ms`
 
+## 第五轮（协议精简 + 远端结果本地回填）
+
+### 优化点
+
+- Peer 接口改为直接传 `group/key`，返回原始 `[]byte`，移除 Protobuf 编解码链路（`geecache/peers.go`, `geecache/geecache.go`, `geecache/http.go`）
+- 远端拉取成功后立刻回填本地缓存，避免同 key 重复跨节点（`geecache/geecache.go`）
+
+### 结果（`20000` 请求，并发 `200`）
+
+- 热点 key（`Tom`）：`QPS 54352.04`，`avg 3.49ms / p95 9.75ms`
+- 混合 key（`Tom/Jack/Sam`）：`QPS 44419.84`，`avg 4.26ms / p95 11.92ms`
+
 ## 阶段结论
 
-- 当前最好成绩（热点 key）已达约 `55k QPS`，较第一轮（`27.6k`）提升约 `2x`。
+- 当前最好成绩（热点 key）约 `55k QPS`，较第一轮（`27.6k`）提升约 `2x`。
 - 距离 `100k+ QPS` 目标仍有差距，下一步建议：
   - 扩大 key 基数（如 `1k+`）做更真实分片收益评估
-  - 优化远程路径序列化与批量请求
+  - 增加批量请求（batch get）减少 syscall 次数
   - 引入更贴近生产的压测工具与 CPU/GC 指标采集
